@@ -1,0 +1,60 @@
+# --- GLOBAL & OS FILES ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# --- SECURITY (CRITICAL) ---
+# Ignores .env files in ANY folder (root, backend, or frontend)
+.env
+.env.*
+!.env.example
+# Block standard keys if you ever save them to files
+*.pem
+*.key
+
+# --- PYTHON (BACKEND) ---
+# Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments (catches venv in root or backend)
+venv/
+.venv/
+env/
+
+# Distribution / Build
+build/
+dist/
+*.egg-info/
+
+# --- NODE.JS & NEXT.JS (FRONTEND) ---
+# Dependencies
+node_modules/
+
+# Next.js Build Outputs
+.next/
+out/
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local Next.js Environment files
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# --- MONOREPO BUILD ARTIFACTS ---
+# If you run the build locally, Next.js 'export' creates an 'out' folder.
+# We don't want to commit that.
+frontend/out/
+
+# If you copy files to backend/static for local testing, ignore them.
+# (Keep this commented out if you actually store images/css in static manually)
+# backend/static/
