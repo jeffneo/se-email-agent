@@ -1,9 +1,86 @@
 import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
+import { useSmoothStreaming } from "./useSmoothStreaming";
 
 // Define the shape of a message
 type Message = {
   role: "user" | "bot";
   content: string;
+};
+
+// Place this outside App or in a new file
+const SmoothMessage = ({
+  content,
+  isStreaming,
+  onScrollNeeded,
+}: {
+  content: string;
+  isStreaming: boolean;
+  onScrollNeeded: () => void;
+}) => {
+  // If we are actively streaming, use the hook.
+  // If not (historic message), just show the full text instantly for performance.
+  const smoothText = useSmoothStreaming(content, 15); // 15ms per char = ~400 WPM
+  const textToShow = isStreaming ? smoothText : content;
+
+  // The "Pin to Bottom" Effect
+  useEffect(() => {
+    // Whenever the text grows, ask parent to scroll
+    if (isStreaming && onScrollNeeded) {
+      onScrollNeeded();
+    }
+  }, [smoothText, isStreaming, onScrollNeeded]);
+
+  return (
+    <ReactMarkdown components={markdownComponents}>{textToShow}</ReactMarkdown>
+  );
+};
+
+// 1. DEFINE STYLES OUTSIDE TO PREVENT RE-RENDERS
+const markdownComponents = {
+  a: ({ ...props }) => (
+    <a
+      {...props}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-300 hover:text-blue-200 underline break-words"
+    />
+  ),
+  code: ({ ...props }) => (
+    <code
+      {...props}
+      className="bg-gray-800 rounded px-1 py-0.5 text-xs font-mono break-all"
+    />
+  ),
+  p: ({ ...props }) => <p {...props} className="mb-2 last:mb-0" />,
+  // Add lists too for good measure
+  ul: ({ ...props }) => (
+    <ul {...props} className="list-disc pl-4 mb-2 space-y-1" />
+  ),
+  ol: ({ ...props }) => (
+    <ol {...props} className="list-decimal pl-4 mb-2 space-y-1" />
+  ),
+};
+
+// Simple animated dots component
+// interval = wait time between adding a dot (in ms)
+const ThinkingDots = ({ interval = 500 }: { interval?: number }) => {
+  const [dots, setDots] = useState(".");
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      // setDots((prev) => (prev.length < 3 ? prev + "." : "."));
+      setDots((prev) => prev + ".");
+    }, interval);
+
+    return () => clearInterval(timer);
+  }, [interval]);
+
+  return (
+    <span className="animate-pulse text-gray-400 font-bold text-xl">
+      {dots}
+    </span>
+  );
 };
 
 function App() {
@@ -117,25 +194,50 @@ function App() {
             </div>
           )}
 
-          {messages.map((msg, idx) => (
-            <div
-              key={idx}
-              className={`flex ${
-                msg.role === "user" ? "justify-end" : "justify-start"
-              }`}
-            >
+          {messages.map((msg, idx) => {
+            // Determine if this specific message is the one currently streaming
+            const isLastMessage = idx === messages.length - 1;
+            const isBot = msg.role === "bot";
+            const isStreaming = isLastMessage && isBot;
+
+            return (
               <div
-                className={`max-w-[85%] rounded-lg p-3 text-sm leading-relaxed shadow-sm ${
-                  msg.role === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 text-gray-100 border border-gray-600"
+                key={idx}
+                className={`flex ${
+                  msg.role === "user" ? "justify-end" : "justify-start"
                 }`}
               >
-                <p className="whitespace-pre-wrap">{msg.content}</p>
+                <div
+                  className={`max-w-[85%] rounded-lg p-3 text-sm leading-relaxed shadow-sm overflow-hidden ${
+                    msg.role === "user"
+                      ? "bg-blue-600 text-white"
+                      : "bg-gray-700 text-gray-100 border border-gray-600"
+                  }`}
+                >
+                  {/* Logic: 
+                      1. If Bot + Empty -> Show Thinking Dots 
+                      2. If Bot + Text -> Show Smooth Stream 
+                      3. If User -> Show Text Normal 
+                  */}
+
+                  {isBot && msg.content === "" ? (
+                    <ThinkingDots interval={400} />
+                  ) : (
+                    <SmoothMessage
+                      content={msg.content}
+                      isStreaming={isStreaming}
+                      onScrollNeeded={() =>
+                        messagesEndRef.current?.scrollIntoView({
+                          behavior: "auto",
+                        })
+                      }
+                    />
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
-          <div ref={messagesEndRef} />
+            );
+          })}
+          <div ref={messagesEndRef} className="pt-8" />
         </div>
 
         {/* Input Area */}
@@ -171,3 +273,29 @@ function App() {
 }
 
 export default App;
+
+// {messages.map((msg, idx) => (
+//             <div
+//               key={idx}
+//               className={`flex ${
+//                 msg.role === "user" ? "justify-end" : "justify-start"
+//               }`}
+//             >
+//               <div
+//                 className={`max-w-[85%] rounded-lg p-3 text-sm leading-relaxed shadow-sm overflow-hidden ${
+//                   msg.role === "user"
+//                     ? "bg-blue-600 text-white"
+//                     : "bg-gray-700 text-gray-100 border border-gray-600"
+//                 }`}
+//               >
+//                 {/* CONDITIONAL RENDERING */}
+//                 {msg.role === "bot" && msg.content === "" ? (
+//                   <ThinkingDots interval={500} />
+//                 ) : (
+//                   <ReactMarkdown components={markdownComponents}>
+//                     {msg.content}
+//                   </ReactMarkdown>
+//                 )}
+//               </div>
+//             </div>
+//           ))}
