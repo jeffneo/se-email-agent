@@ -12,7 +12,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # --- STAGE 2: Build Backend (Python) ---
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
