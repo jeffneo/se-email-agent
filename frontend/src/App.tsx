@@ -1,10 +1,13 @@
 import { useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import { useSmoothStreaming } from "./useSmoothStreaming";
+// uuid v4
+import { v4 as uuidv4 } from "uuid";
 
 // Define the shape of a message
 type Message = {
-  role: "user" | "bot";
+  id: string;
+  role: "user" | "assistant";
   content: string;
 };
 
@@ -88,6 +91,8 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
+  const threadIdRef = useRef<string>(uuidv4()); // Generate a unique thread ID for this session
+
   // 1. The Mutex Lock
   // Prevents double-firing in React Strict Mode
   const isSubmittingRef = useRef(false);
@@ -118,21 +123,33 @@ function App() {
     setInput("");
 
     // Create the new history log to send to the backend
-    const userMessage: Message = { role: "user", content: userMessageContent };
+    const userMessage: Message = {
+      id: uuidv4(),
+      role: "user",
+      content: userMessageContent,
+    };
     const newHistory = [...messages, userMessage];
 
     // Optimistic UI Update
     setMessages((prev) => [...prev, userMessage]);
-    setMessages((prev) => [...prev, { role: "bot", content: "" }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: uuidv4(), role: "assistant", content: "" },
+    ]);
 
     try {
       // 2. The Fetch Call
       // Note: We use a relative URL "/stream".
       // The Vite Proxy in vite.config.ts forwards this to http://127.0.0.1:8000
+      const requestBody = JSON.stringify({
+        messages: newHistory,
+        threadId: threadIdRef.current,
+      });
+      console.log("Sending request body:", requestBody);
       const response = await fetch("/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: newHistory }),
+        body: requestBody,
       });
 
       if (!response.body) throw new Error("No response body");
@@ -167,7 +184,11 @@ function App() {
       console.error("Error streaming:", error);
       setMessages((prev) => [
         ...prev,
-        { role: "bot", content: "Error: Could not connect to the agent." },
+        {
+          id: uuidv4(),
+          role: "assistant",
+          content: "Error: Could not connect to the agent.",
+        },
       ]);
     } finally {
       // Unlock the mutex
@@ -197,8 +218,8 @@ function App() {
           {messages.map((msg, idx) => {
             // Determine if this specific message is the one currently streaming
             const isLastMessage = idx === messages.length - 1;
-            const isBot = msg.role === "bot";
-            const isStreaming = isLastMessage && isBot;
+            const isAssistant = msg.role === "assistant";
+            const isStreaming = isLastMessage && isAssistant;
 
             return (
               <div
@@ -220,7 +241,7 @@ function App() {
                       3. If User -> Show Text Normal 
                   */}
 
-                  {isBot && msg.content === "" ? (
+                  {isAssistant && msg.content === "" ? (
                     <ThinkingDots interval={400} />
                   ) : (
                     <SmoothMessage
