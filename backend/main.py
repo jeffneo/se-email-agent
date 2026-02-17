@@ -1,42 +1,75 @@
 import os
 from dotenv import load_dotenv
-from google import genai
-from google.genai import types
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import List
+import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Gemini API key
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    raise ValueError("GEMINI_API_KEY environment variable not set.")
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import BackgroundTasks
 
-# The SDK handles the connection logic here.
-client = genai.Client(api_key=api_key)
+from contextlib import asynccontextmanager
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from pydantic import BaseModel
+from typing import List
+from datetime import datetime
+
+from database import init_driver, close_driver, query as query_neo4j
+from graph import build_graph
+from services.embedder import process_pending_nodes
+
+# --- GLOBAL GRAPH INSTANCE ---
+app_graph = None
+
+# --- LIFESPAN MANAGER ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- PHASE 1: STARTUP ---
+    # This code runs ONE TIME when you press 'Play' (start uvicorn).
+    # It's where you open connections, load ML models, or read config files.
+    await init_driver()
+    print("🚀 App is ready to receive requests!")
+
+    # Build the Graph once at startup.
+    # (Since our config is static for now, this is efficient)
+    global app_graph
+    app_graph = build_graph()
+
+    # --- PHASE 2: THE PAUSE BUTTON (YIELD) ---
+    # The application "pauses" here and goes to work.
+    # It stays in this state for days/weeks, serving user requests.
+    yield 
+
+    # --- PHASE 3: SHUTDOWN ---
+    # This code runs ONE TIME when you press 'Ctrl+C' (stop uvicorn).
+    # It ensures you close the database connection safely before the process dies.
+    print("🛑 App is shutting down...")
+    await close_driver()
 
 # create app instance
-app = FastAPI()
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["http://localhost:3000"], # Allow your React app
-#     allow_credentials=True,
-#     allow_methods=["*"], # Allow all methods (POST, GET, etc)
-#     allow_headers=["*"],
-# )
+app = FastAPI(lifespan=lifespan)
+# CORS (Allow frontend to talk to backend)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # 1. Define the Message structure
 class Message(BaseModel):
+    id: str
     role: str
     content: str
 
 # 2. Update the Request Model
 class ChatRequest(BaseModel):
     messages: List[Message] # Now accepts the whole history
+    threadId: str
 
 # define path operation for health check endpoint
 @app.get("/health_check")
@@ -47,53 +80,69 @@ async def health_check():
 # --- THE ENDPOINT ---
 @app.post("/stream")
 async def stream_chat(request: ChatRequest):
-    
-    # 1. Define the "Sales Engineer" Persona
-    # We explicitly tell it to use its search tool on a specific domain.
-    system_instruction = """
-    You are a helpful, expert Neo4j Sales Engineer. 
-    Your goal is to answer technical questions for customers clearly and concisely.
-
-    GUIDELINES:
-    1. CONTEXT FIRST: Base your answers strictly on the search results or provided context. Do not hallucinate features.
-    2. CONCISENESS: Keep answers to 1-2 short paragraphs. Avoid long lectures.
-    3. CODE: Do NOT provide code examples unless the user specifically asks for them, or if a 1-line snippet is necessary for clarity.
-    4. LINKS: Provide citations as inline markdown links (e.g., "See the [Cypher Manual](url)..."). Do not add a "Sources" list at the end.  SOURCE ALL TECHNICAL CLAIMS.
-    5. TONE: Be conversational but professional. (e.g., "You can use...")
-
-    If the answer is simple and you are confident, state it directly without over-searching.
     """
-
-    async def generate_chunks():
-        try:
-            # 2. Build the history string
-            conversation_history = system_instruction + "\n\n"
-            for msg in request.messages:
-                conversation_history += f"{msg.role.upper()}: {msg.content}\n"
-            conversation_history += "BOT:"
-
-            # 3. Call Gemini with Search Enabled
-            # We add the 'tools' configuration here.
-            response_stream = await client.aio.models.generate_content_stream(
-                model="gemini-2.5-flash",
-                contents=conversation_history,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(
-                        google_search=types.GoogleSearch() # <--- THE MAGIC SWITCH
-                    )],
-                    response_modalities=["TEXT"]
-                )
-            )
+    The main chat endpoint.
+    It purely handles I/O. The Logic is all in the Graph.
+    """
+    print(f"Received request with {len(request.messages)} messages at {datetime.now().isoformat()}")
+    
+    # 1. Convert Frontend JSON -> LangChain Messages
+    # CRITICAL CHANGE: We do NOT inject the System Prompt here anymore.
+    # The 'agent_node' in graph/nodes.py handles that dynamically.
+    history = []
+    
+    for msg in request.messages:
+        if msg.role == "user":
+            history.append(HumanMessage(content=msg.content))
+        elif msg.role == "assistant":
+            history.append(AIMessage(content=msg.content))
+        # Security: Ignore 'system' messages from frontend to prevent prompt injection
             
-            async for chunk in response_stream:
-                # Grounding chunks sometimes come back with metadata (sources), 
-                # but 'chunk.text' contains the actual synthesized answer.
-                if chunk.text:
-                    yield chunk.text
-                    
-        except Exception as e:
-            yield f"\nError: {str(e)}"
+    # 2. Generator function
+    async def generate():
+        if not app_graph:
+            yield "Error: Graph not initialized."
+            return
+            
+        # Stream events from the graph
+        async for event in app_graph.astream_events(
+            {"messages": history, "thread_id": request.threadId}, 
+            version="v1"
+        ):
+            kind = event["event"]
+            
+            # "on_chat_model_stream" is when the LLM is writing text
+            if kind == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                content = chunk.content
+                
+                if content:
+                    # Robust handling for string vs list content
+                    if isinstance(content, str):
+                        yield content
+                    elif isinstance(content, list):
+                         for block in content:
+                            if isinstance(block, str):
+                                yield block
+                            elif isinstance(block, dict) and "text" in block:
+                                yield block["text"]
+            
+        asyncio.create_task(process_pending_nodes())
 
-    return StreamingResponse(generate_chunks(), media_type="text/plain")
+    return StreamingResponse(generate(), media_type="text/plain")
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+@app.get("/api/test-db")
+async def test_db():
+    try:
+        # Use our new helper function
+        result = await query_neo4j("RETURN 'Hello from Aura!' AS message")
+        record = result.records[0]
+        return {"status": "success", "message": record["message"]}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# --- STATIC FILES ---
+# Mount the frontend if it exists
+frontend_path = os.path.join(os.path.dirname(__file__), "../frontend/dist")
+if os.path.exists(frontend_path):
+    app.mount("/", StaticFiles(directory=frontend_path, html=True), name="static")
